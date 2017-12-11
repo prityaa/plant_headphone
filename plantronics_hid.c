@@ -18,21 +18,25 @@ struct plan_driver_data {
 	unsigned char *transfer_buffer;
 };
 
+void print_hex(const char *s)
+{
+	while(*s)
+		printk("%02x", (unsigned int) *s++);
+	printk("\n");
+}
+
 static void plant_hid_complete(struct urb *urb)
 {
-	pr_debug("%s : calling complete\n", __func__);
+	pr_debug("%s : calling complete, status = %d\n", __func__, urb->status);
 	if ((urb->status == -ENOENT) ||         /* unlinked */
             (urb->status == -ENODEV) ||         /* device removed */
             (urb->status == -ECONNRESET) ||     /* unlinked */
             (urb->status == -ESHUTDOWN))        /* device disabled */
-                goto exit_clear;
-        return;
+	        return;
 	
-	pr_debug("%s : buffer = %s\n", __func__, (char *)urb->transfer_buffer);
-
-exit_clear:
+	pr_debug("%s : buffer = \n", __func__); 
+	print_hex(urb->transfer_buffer);
         usb_submit_urb(urb, GFP_ATOMIC);
-	
 }
 
 static void plant_hid_free_urb(struct plan_driver_data *drv_data)
@@ -123,14 +127,15 @@ static int plnt_hid_probe(struct usb_interface *intf,
 	drv_data->intf = interface;
 	drv_data->ep = ep;
 	drv_data->usb_dev = usb_dev;
+//	drv_data->urb = urb;
 	
 	pr_debug("%s : buffer = %p\n", __func__, drv_data->transfer_buffer);
-	usb_fill_int_urb(urb, usb_dev, pipe, 
+	usb_fill_int_urb(drv_data->urb, usb_dev, pipe, 
 			drv_data->transfer_buffer, mx_pkt_sz, 
 			plant_hid_complete, drv_data, ep->bInterval);	
 #endif
+	usb_submit_urb(drv_data->urb, GFP_KERNEL);
 	usb_set_intfdata(intf, drv_data);
-	usb_submit_urb(urb, GFP_KERNEL);
 
 	return 0;
 }

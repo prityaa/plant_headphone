@@ -1,7 +1,7 @@
 obj-m += plantronics_hid.o
 
 # to enable pr_debug
-FLAGS_plantronics_audio_out.o += -DDEBUG
+CFLAGS_plantronics_hid.o += -DDEBUG
 CFLAGS_plantronics_audio_out.o += -DDEBUG_ALL
 
 KERN_DIR = '/lib/modules/$(uname -r)/'
