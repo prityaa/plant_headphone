@@ -2,6 +2,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/usb.h>
+#include <linux/hid.h>
 #include <linux/slab.h>
 
 #define HUMAN_INTERFACE	3
@@ -16,6 +17,7 @@ struct plan_driver_data {
 	struct usb_device *usb_dev;
 	struct urb *urb;
 	unsigned char *transfer_buffer;
+        char *hid_report_desc;
 };
 
 void print_hex(const char *s)
@@ -69,6 +71,24 @@ static int plant_hid_alloc_urb(struct plan_driver_data *drv_data, int sz)
 	return 0;	
 }
 
+static int plant_hid_get_class_descriptor(struct usb_device *dev, int ifnum,
+                                unsigned char type, void *buf, int size)
+{
+        int result, retries = 4;
+
+        memset(buf, 0, size);
+        do {
+                result = usb_control_msg(dev, usb_rcvctrlpipe(dev, 0),
+                        USB_REQ_GET_DESCRIPTOR, USB_RECIP_INTERFACE
+                        | USB_DIR_IN, (type << 8), ifnum, buf, size,
+                        USB_CTRL_GET_TIMEOUT);
+
+                retries--;
+        } while (result < size && retries);
+        return result;
+}
+
+
 static int plnt_hid_probe(struct usb_interface *intf, 
 				const struct usb_device_id *ids)
 {
@@ -77,7 +97,6 @@ static int plnt_hid_probe(struct usb_interface *intf,
 	struct plan_driver_data *drv_data;
 	struct usb_endpoint_descriptor *ep;
 	struct usb_host_interface *cur_set = intf->cur_altsetting;
-	struct urb *urb;
 	int ret, pipe, mx_pkt_sz;
 	
 	ep = &cur_set->endpoint->desc;
@@ -103,7 +122,7 @@ static int plnt_hid_probe(struct usb_interface *intf,
 		dev_err(&interface->dev, "HID NOT found\n");
                 return -ENODEV;
 	}
-#if 1 
+	
 	pr_debug("%s : ep = %p\n", __func__, ep);
 	if(ep == NULL) {
 		dev_err(&interface->dev, "ep not found\n");	
@@ -119,25 +138,50 @@ static int plnt_hid_probe(struct usb_interface *intf,
 	pr_debug("%s : allocing urb\n", __func__);
 	if ((ret = plant_hid_alloc_urb(drv_data, mx_pkt_sz)) < 0) {
 		dev_err(&interface->dev, "%s : alloc urb\n", __func__);
-		kfree(drv_data);
-                return -ENOMEM;
+		goto fail1;
 	}
 
 	pr_debug("%s : assigning drv_data\n", __func__);
 	drv_data->intf = interface;
 	drv_data->ep = ep;
 	drv_data->usb_dev = usb_dev;
-//	drv_data->urb = urb;
+
+	if ((drv_data->hid_report_desc = kzalloc(mx_pkt_sz, GFP_KERNEL)) == NULL ) {
+		dev_err(&interface->dev, "failed to alloc hid_report_desc\n");
+		ret = -ENOMEM;
+		goto fail2; 
+	}
+
+	if ((plant_hid_get_class_descriptor(usb_dev, cur_set->desc.bInterfaceNumber,
+                        HID_DT_REPORT, drv_data->hid_report_desc, mx_pkt_sz)) < 0) {
+                dev_err(&interface->dev, "reading report descriptor failed\n");
+		ret = -ENOMEM;
+		goto fail3;
+        }	
+
+	pr_debug("%s : drv_data->hid_report_desc :", __func__); print_hex(drv_data->hid_report_desc);	
 	
-	pr_debug("%s : buffer = %p\n", __func__, drv_data->transfer_buffer);
 	usb_fill_int_urb(drv_data->urb, usb_dev, pipe, 
 			drv_data->transfer_buffer, mx_pkt_sz, 
 			plant_hid_complete, drv_data, ep->bInterval);	
-#endif
+	
 	usb_submit_urb(drv_data->urb, GFP_KERNEL);
 	usb_set_intfdata(intf, drv_data);
 
 	return 0;
+
+fail3:
+	if(drv_data->hid_report_desc)
+		kfree(drv_data->hid_report_desc);
+fail2:
+	usb_kill_urb(drv_data->urb);
+	plant_hid_free_urb(drv_data);
+fail1:
+	if (drv_data)
+		kfree(drv_data);
+	
+	return ret;
+	
 }
 
 static void plnt_hid_remove(struct usb_interface *intf)
@@ -150,6 +194,8 @@ static void plnt_hid_remove(struct usb_interface *intf)
 		usb_kill_urb(drv_data->urb);
 		plant_hid_free_urb(drv_data);
 		pr_debug("%s : hid free urb \n", __func__);
+		if(drv_data->hid_report_desc)
+	                kfree(drv_data->hid_report_desc);
 		kfree(drv_data);
 	}
 }
