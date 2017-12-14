@@ -11,25 +11,6 @@ MODULE_AUTHOR("PRITAM");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("HID TEST");
 
-static const unsigned char usb_kbd_keycode[256] = {
-          0,  0,  0,  0, 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38,
-         50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44,  2,  3,
-          4,  5,  6,  7,  8,  9, 10, 11, 28,  1, 14, 15, 57, 12, 13, 26,
-         27, 43, 43, 39, 40, 41, 51, 52, 53, 58, 59, 60, 61, 62, 63, 64,
-         65, 66, 67, 68, 87, 88, 99, 70,119,110,102,104,111,107,109,106,
-        105,108,103, 69, 98, 55, 74, 78, 96, 79, 80, 81, 75, 76, 77, 71,
-         72, 73, 82, 83, 86,127,116,117,183,184,185,186,187,188,189,190,
-        191,192,193,194,134,138,130,132,128,129,131,137,133,135,136,113,
-        115,114,  0,  0,  0,121,  0, 89, 93,124, 92, 94, 95,  0,  0,  0,
-        122,123, 90, 91, 85,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-          0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-          0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-          0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-          0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-         29, 42, 56,125, 97, 54,100,126,164,166,165,163,161,115,114,113,
-        150,158,159,128,136,177,178,176,142,152,173,140
-};
-
 struct plan_driver_data {
 	struct input_dev *input_dev;
 	struct usb_interface *intf;
@@ -40,6 +21,7 @@ struct plan_driver_data {
         char *hid_report_desc;
 	char name[128];
         char phys[64];
+	int rlength;
 };
 
 static inline void
@@ -51,10 +33,10 @@ usb_to_input_id(const struct usb_device *dev, struct input_id *id)
         id->version = le16_to_cpu(dev->descriptor.bcdDevice);
 }
 
-void print_hex(const char *s)
+void print_hex(const char *s, int sz)
 {
-	while(*s)
-		printk("%02x", (unsigned int) *s++);
+	while(--sz)
+		printk("%02x ", (unsigned int) *s++);
 	printk("\n");
 }
 
@@ -68,7 +50,7 @@ static void plant_hid_complete(struct urb *urb)
 	        return;
 	
 	pr_debug("%s : buffer = \n", __func__); 
-	print_hex(urb->transfer_buffer);
+	print_hex(urb->transfer_buffer, 37);
         usb_submit_urb(urb, GFP_ATOMIC);
 }
 
@@ -165,6 +147,7 @@ static int plnt_hid_probe(struct usb_interface *intf,
 	struct usb_interface *interface = intf;
 	struct plan_driver_data *drv_data;
 	struct usb_endpoint_descriptor *ep;
+	struct hid_descriptor *plant_hid_desc;
 	struct usb_host_interface *cur_set = intf->cur_altsetting;
 	int ret, pipe, mx_pkt_sz, i;
 	struct input_dev *input_dev;
@@ -189,7 +172,7 @@ static int plnt_hid_probe(struct usb_interface *intf,
 	pr_debug("%s : bInterfaceClass = %d\n", 
 		__func__, cur_set->desc.bInterfaceClass);
 	if (cur_set->desc.bInterfaceClass != HUMAN_INTERFACE) {
-		dev_err(&interface->dev, "HID NOT found\n");
+		dev_err(&interface->dev, "HID Device not found\n");
                 return -ENODEV;
 	}
 	
@@ -206,11 +189,48 @@ static int plnt_hid_probe(struct usb_interface *intf,
 		return -ENOMEM;
 	}
 
+        pr_debug("%s : getting extra desc\n", __func__);
+	if (usb_get_extra_descriptor(cur_set, HID_DT_HID, &plant_hid_desc) &&
+                        (!cur_set->desc.bNumEndpoints ||
+                         usb_get_extra_descriptor(&cur_set->endpoint[0],
+                                        HID_DT_HID, &plant_hid_desc))) {
+                dev_err(&interface->dev, "extra descriptor not present\n");
+                return -ENODEV;
+        }
+
+	drv_data->rlength = le16_to_cpu(plant_hid_desc->desc[0].wDescriptorLength);
+	pr_debug("%s : drv_data->rlength = %d\n", __func__, drv_data->rlength);
+        if (!drv_data->rlength || drv_data->rlength > HID_MAX_DESCRIPTOR_SIZE) {
+                dev_err(&intf->dev, "weird size of report descriptor (%u)\n",
+                        drv_data->rlength);
+                return -EINVAL;
+        }
+
 	pr_debug("%s : allocing urb\n", __func__);
 	if ((ret = plant_hid_alloc_urb(drv_data, mx_pkt_sz)) < 0) {
 		dev_err(&interface->dev, "%s : alloc urb\n", __func__);
 		goto fail1;
 	}
+
+	pr_debug("%s : allocing hid_report_desc\n", __func__);
+	if ((drv_data->hid_report_desc = kzalloc(drv_data->rlength, GFP_KERNEL)) == NULL ) {
+		dev_err(&interface->dev, "failed to alloc hid_report_desc\n");
+		ret = -ENOMEM;
+		goto fail2; 
+	}
+
+	pr_debug("%s : extra descriptor : ", __func__);
+	print_hex(drv_data->hid_report_desc, drv_data->rlength);
+
+	if ((plant_hid_get_class_descriptor(usb_dev, cur_set->desc.bInterfaceNumber,
+                        HID_DT_REPORT, drv_data->hid_report_desc, drv_data->rlength)) < 0) {
+                dev_err(&interface->dev, "reading report descriptor failed\n");
+		ret = -ENOMEM;
+		goto fail3;
+        }	
+
+	pr_debug("%s : class descriptor : ", __func__);
+	print_hex(drv_data->hid_report_desc, drv_data->rlength);
 
 	pr_debug("%s : manufacturer = %s\n", __func__, usb_dev->manufacturer);
 	if (usb_dev->manufacturer)
@@ -245,8 +265,8 @@ static int plnt_hid_probe(struct usb_interface *intf,
                 BIT_MASK(LED_SCROLLL) | BIT_MASK(LED_COMPOSE) |
                 BIT_MASK(LED_KANA);
 
-	for (i = 0; i < 255; i++)
-                set_bit(usb_kbd_keycode[i], input_dev->keybit);
+	for (i = 0; i < drv_data->rlength; i++)
+                set_bit(drv_data->hid_report_desc[i], input_dev->keybit);
         clear_bit(0, input_dev->keybit);
 
 /*
@@ -260,21 +280,7 @@ static int plnt_hid_probe(struct usb_interface *intf,
 	drv_data->usb_dev = usb_dev;
 	drv_data->input_dev = input_dev;
 
-	if ((drv_data->hid_report_desc = kzalloc(mx_pkt_sz, GFP_KERNEL)) == NULL ) {
-		dev_err(&interface->dev, "failed to alloc hid_report_desc\n");
-		ret = -ENOMEM;
-		goto fail2; 
-	}
 
-	if ((plant_hid_get_class_descriptor(usb_dev, cur_set->desc.bInterfaceNumber,
-                        HID_DT_REPORT, drv_data->hid_report_desc, mx_pkt_sz)) < 0) {
-                dev_err(&interface->dev, "reading report descriptor failed\n");
-		ret = -ENOMEM;
-		goto fail3;
-        }	
-
-	pr_debug("%s : drv_data->hid_report_desc :", __func__); print_hex(drv_data->hid_report_desc);	
-	
 	usb_fill_int_urb(drv_data->urb, usb_dev, pipe, 
 			drv_data->transfer_buffer, mx_pkt_sz, 
 			plant_hid_complete, drv_data, ep->bInterval);	
@@ -332,8 +338,7 @@ static void plnt_hid_remove(struct usb_interface *intf)
 }
 
 static struct usb_device_id plnt_hid_device_id[] = {
-       // { USB_DEVICE(0x047f, 0xc024) },
-	{USB_DEVICE_INTERFACE_CLASS(0x047f, 0xc024, USB_CLASS_HID)},
+	{ USB_DEVICE_INTERFACE_CLASS(0x047f, 0xc024, USB_CLASS_HID) },
         {},
 };
 MODULE_DEVICE_TABLE (usb, plnt_hid_device_id);
